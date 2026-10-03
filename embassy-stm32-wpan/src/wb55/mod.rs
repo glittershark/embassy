@@ -6,7 +6,7 @@ use core::sync::atomic::{Ordering, compiler_fence};
 
 use embassy_hal_internal::Peri;
 use embassy_stm32::interrupt;
-use embassy_stm32::ipcc::{Config, Ipcc, IpccRxChannel, ReceiveInterruptHandler, TransmitInterruptHandler};
+use embassy_stm32::ipcc::{Config, Ipcc, ReceiveInterruptHandler, TransmitInterruptHandler};
 use embassy_stm32::peripherals::IPCC;
 use sub::mm::MemoryManager;
 use sub::sys::Sys;
@@ -39,7 +39,11 @@ pub struct TlMbox<'d> {
     pub ble_subsystem: sub::ble::Ble<'d>,
     #[cfg(feature = "wb55_mac")]
     pub mac_subsystem: sub::mac::Mac<'d>,
-    pub traces: IpccRxChannel<'d>,
+    #[cfg(feature = "wb55_thread")]
+    pub thread_subsystem: sub::thread::Thread<'d>,
+    pub traces_subsystem: sub::traces::Traces<'d>,
+    /// The first system event from CPU2 after boot: which firmware runs there.
+    pub ready: Result<shci::SchiSysEventReady, ()>,
 }
 
 impl<'d> TlMbox<'d> {
@@ -77,12 +81,29 @@ impl<'d> TlMbox<'d> {
         + interrupt::typelevel::Binding<interrupt::typelevel::IPCC_C1_TX, TransmitInterruptHandler>,
         config: Config,
     ) -> Self {
+        let mut this = Self::init_without_ready(ipcc, _irqs, config);
+        let ready = this.sys_subsystem.read_ready().await;
+        debug!("sys event: {}", ready);
+        this.ready = ready;
+        this
+    }
+
+    /// Like [`init`](Self::init) but returns before CPU2's ready event, so the
+    /// caller can wait for it with a timeout. CPU2 sends that event only once
+    /// after it boots; if it was already running (a CPU1-only reset does not
+    /// restart it) the event never comes, and `ready` stays `Err(())`.
+    pub fn init_without_ready(
+        ipcc: Peri<'d, IPCC>,
+        _irqs: impl interrupt::typelevel::Binding<interrupt::typelevel::IPCC_C1_RX, ReceiveInterruptHandler>
+        + interrupt::typelevel::Binding<interrupt::typelevel::IPCC_C1_TX, TransmitInterruptHandler>,
+        config: Config,
+    ) -> Self {
         // this is an inlined version of TL_Init from the STM32WB firmware as requested by AN5289.
         // HW_IPCC_Init is not called, and its purpose is (presumably?) covered by this
         // implementation
         unsafe {
             TL_REF_TABLE.as_mut_ptr().write_volatile(RefTable {
-                device_info_table: TL_DEVICE_INFO_TABLE.as_ptr(),
+                device_info_table: TL_DEVICE_INFO_TABLE.as_ptr() as *const DeviceInfoTable,
                 ble_table: TL_BLE_TABLE.as_ptr(),
                 thread_table: TL_THREAD_TABLE.as_ptr(),
                 sys_table: TL_SYS_TABLE.as_ptr(),
@@ -159,6 +180,22 @@ impl<'d> TlMbox<'d> {
                     .as_mut_ptr()
                     .write_volatile(MaybeUninit::zeroed().assume_init());
             }
+
+            #[cfg(feature = "wb55_thread")]
+            {
+                THREAD_OT_CMD_BUFFER
+                    .as_mut_ptr()
+                    .write_volatile(MaybeUninit::zeroed().assume_init());
+                THREAD_NOTIF_RSP_EVT_BUFFER
+                    .as_mut_ptr()
+                    .write_volatile(MaybeUninit::zeroed().assume_init());
+                THREAD_CLI_CMD_BUFFER
+                    .as_mut_ptr()
+                    .write_volatile(MaybeUninit::zeroed().assume_init());
+                THREAD_CLI_NOT_BUFFER
+                    .as_mut_ptr()
+                    .write_volatile(MaybeUninit::zeroed().assume_init());
+            }
         }
 
         compiler_fence(Ordering::SeqCst);
@@ -174,9 +211,8 @@ impl<'d> TlMbox<'d> {
         ] = Ipcc::new(ipcc, _irqs, config).split();
 
         let mm = sub::mm::MemoryManager::new(ipcc_mm_release_buffer_channel);
-        let mut sys = sub::sys::Sys::new(ipcc_system_cmd_rsp_channel, ipcc_system_event_channel);
-
-        debug!("sys event: {}", sys.read_ready().await);
+        let sys = sub::sys::Sys::new(ipcc_system_cmd_rsp_channel, ipcc_system_event_channel);
+        let ready = Err(());
 
         Self {
             sys_subsystem: sys,
@@ -191,8 +227,16 @@ impl<'d> TlMbox<'d> {
                 _ipcc_mac_802_15_4_cmd_rsp_channel,
                 _ipcc_mac_802_15_4_notification_ack_channel,
             ),
+            #[cfg(feature = "wb55_thread")]
+            thread_subsystem: sub::thread::Thread::new(
+                _ipcc_mac_802_15_4_cmd_rsp_channel,
+                _ipcc_mac_802_15_4_notification_ack_channel,
+                _ipcc_ble_lld_cmd_channel,
+                _ipcc_ble_lld_rsp_channel,
+            ),
             mm_subsystem: mm,
-            traces: _ipcc_traces_channel,
+            traces_subsystem: sub::traces::Traces::new(_ipcc_traces_channel),
+            ready,
         }
     }
 }

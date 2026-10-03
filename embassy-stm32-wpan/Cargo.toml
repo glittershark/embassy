@@ -55,6 +55,7 @@ defmt = ["dep:defmt", "embassy-sync/defmt", "embassy-embedded-hal/defmt", "embas
 
 wb55 = []
 wb55_ble = ["dep:stm32wb-hci"]
+wb55_thread = []
 wb55_mac = ["dep:bitflags", "dep:embassy-net-driver", "dep:smoltcp", "smoltcp/medium-ieee802154"]
 
 wba = [ "dep:stm32-bindings", "dep:embassy-time" ]

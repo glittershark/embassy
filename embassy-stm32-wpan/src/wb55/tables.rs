@@ -108,9 +108,10 @@ pub struct BleTable {
 #[derive(Debug)]
 #[repr(C)]
 pub struct ThreadTable {
-    pub nostack_buffer: *const u8,
+    pub notack_buffer: *const u8,
     pub clicmdrsp_buffer: *const u8,
     pub otcmdrsp_buffer: *const u8,
+    pub clinot_buffer: *const u8,
 }
 
 #[derive(Debug)]
@@ -194,7 +195,9 @@ pub struct RefTable {
 pub static mut TL_REF_TABLE: MaybeUninit<RefTable> = MaybeUninit::zeroed();
 
 #[unsafe(link_section = "MB_MEM1")]
-pub static mut TL_DEVICE_INFO_TABLE: Aligned<A4, MaybeUninit<DeviceInfoTable>> = Aligned(MaybeUninit::zeroed());
+/// Sized for the larger layout FUS writes here (MB_FUS_DeviceInfoTable_t,
+/// 52 bytes) so it cannot spill into the next table.
+pub static mut TL_DEVICE_INFO_TABLE: Aligned<A4, MaybeUninit<[u32; 16]>> = Aligned(MaybeUninit::zeroed());
 
 #[unsafe(link_section = "MB_MEM1")]
 pub static mut TL_BLE_TABLE: Aligned<A4, MaybeUninit<BleTable>> = Aligned(MaybeUninit::zeroed());
@@ -251,6 +254,24 @@ pub static mut MAC_802_15_4_CMD_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Al
 pub static mut MAC_802_15_4_NOTIF_RSP_EVT_BUFFER: MaybeUninit<
     Aligned<A4, [u8; TL_PACKET_HEADER_SIZE + TL_EVT_HEADER_SIZE + 255]>,
 > = MaybeUninit::zeroed();
+
+#[cfg(feature = "wb55_thread")]
+#[unsafe(link_section = "MB_MEM2")]
+pub static mut THREAD_OT_CMD_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Aligned(MaybeUninit::zeroed());
+
+#[cfg(feature = "wb55_thread")]
+#[unsafe(link_section = "MB_MEM2")]
+pub static mut THREAD_NOTIF_RSP_EVT_BUFFER: MaybeUninit<
+    Aligned<A4, [u8; TL_PACKET_HEADER_SIZE + TL_EVT_HEADER_SIZE + 255]>,
+> = MaybeUninit::zeroed();
+
+#[cfg(feature = "wb55_thread")]
+#[unsafe(link_section = "MB_MEM2")]
+pub static mut THREAD_CLI_CMD_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Aligned(MaybeUninit::zeroed());
+
+#[cfg(feature = "wb55_thread")]
+#[unsafe(link_section = "MB_MEM2")]
+pub static mut THREAD_CLI_NOT_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Aligned(MaybeUninit::zeroed());
 
 #[unsafe(link_section = "MB_MEM2")]
 pub static mut EVT_POOL: Aligned<A4, MaybeUninit<[u8; POOL_SIZE]>> = Aligned(MaybeUninit::zeroed());

@@ -1,15 +1,18 @@
+use core::ptr;
 use core::slice;
+use core::sync::atomic::{Ordering, compiler_fence};
 
 use embassy_stm32::ipcc::{IpccRxChannel, IpccTxChannel};
 
 use crate::cmd::CmdPacket;
 use crate::consts::TlPacketType;
-use crate::evt::EvtBox;
+use crate::evt::{EvtBox, EvtStub};
 #[cfg(feature = "wb55_ble")]
 use crate::shci::ShciBleInitCmdParam;
 use crate::shci::{SchiCommandStatus, SchiFromPacket, SchiSysEventReady, ShciFusGetStateErrorCode, ShciOpcode};
 use crate::sub::mm;
-use crate::tables::{SysTable, WirelessFwInfoTable};
+use crate::tables::{DeviceInfoTable, SysTable, WirelessFwInfoTable};
+use crate::wb55::PacketHeader;
 use crate::unsafe_linked_list::LinkedListNode;
 use crate::wb55::{SYS_CMD_BUF, SYSTEM_EVT_QUEUE, TL_DEVICE_INFO_TABLE, TL_SYS_TABLE};
 
@@ -47,7 +50,7 @@ impl<'a> Sys<'a> {
 
     /// Returns CPU2 wireless firmware information (if present).
     pub fn wireless_fw_info(&self) -> Option<WirelessFwInfoTable> {
-        let info = unsafe { TL_DEVICE_INFO_TABLE.as_mut_ptr().read_volatile().wireless_fw_info_table };
+        let info = unsafe { (TL_DEVICE_INFO_TABLE.as_ptr() as *const DeviceInfoTable).read_volatile().wireless_fw_info_table };
 
         // Zero version indicates that CPU2 wasn't active and didn't fill the information table
         if info.version != 0 { Some(info) } else { None }
@@ -90,8 +93,56 @@ impl<'a> Sys<'a> {
     }
 
     pub async fn shci_c2_fus_getstate(&mut self) -> Result<ShciFusGetStateErrorCode, ()> {
-        self.write_and_get_response(ShciOpcode::FusStartWirelessStack, &[])
-            .await
+        self.write_and_get_response(ShciOpcode::FusGetState, &[]).await
+    }
+
+    /// FUS_GET_STATE as ST's SHCI_C2_FUS_GetState(): returns (state, error
+    /// code). Only FUS answers it properly. While the wireless stack is
+    /// running it answers 0xFF the first time and reboots the whole device
+    /// into FUS the second time.
+    pub async fn shci_c2_fus_get_state(&mut self) -> (u8, u8) {
+        self.write(ShciOpcode::FusGetState, &[]).await;
+        self.ipcc_system_cmd_rsp_channel.flush().await;
+
+        unsafe {
+            let p_cmd_serial = (SYS_CMD_BUF.as_ptr() as *const u8).add(size_of::<PacketHeader>());
+            // Command-complete event: num_cmd (1), cmd_code (2), then payload.
+            let p_payload = p_cmd_serial.add(size_of::<EvtStub>() + 3);
+            compiler_fence(Ordering::Acquire);
+            (ptr::read_volatile(p_payload), ptr::read_volatile(p_payload.add(1)))
+        }
+    }
+
+    pub async fn shci_c2_fus_fw_delete(&mut self) -> Result<SchiCommandStatus, ()> {
+        self.write_and_get_response(ShciOpcode::FusFirmwareDelete, &[]).await
+    }
+
+    /// SHCI_C2_REINIT: ask a CPU2 that is already running (booted by a
+    /// bootloader, or kept running across a CPU1-only reset) to re-read the
+    /// reference table and send its ready event again.
+    pub async fn shci_c2_reinit(&mut self) -> Result<SchiCommandStatus, ()> {
+        self.write_and_get_response(ShciOpcode::ReInit, &[]).await
+    }
+
+    /// SHCI_C2_FLASH_EraseActivity: warn CPU2 before CPU1 erases flash and
+    /// again when done, so it can protect its radio timing.
+    pub async fn shci_c2_flash_erase_activity(&mut self, on: bool) -> Result<SchiCommandStatus, ()> {
+        self.write_and_get_response(ShciOpcode::FlashEraseActivity, &[on as u8]).await
+    }
+
+    pub async fn shci_c2_thread_init(&mut self) -> Result<SchiCommandStatus, ()> {
+        self.write_and_get_response(ShciOpcode::ThreadInit, &[]).await
+    }
+
+    /// The device info table as filled in by CPU2 (wireless-firmware layout).
+    pub fn device_info(&self) -> DeviceInfoTable {
+        unsafe { ptr::read_volatile(TL_DEVICE_INFO_TABLE.as_ptr() as *const DeviceInfoTable) }
+    }
+
+    /// Raw words of the device info table region; when FUS is running the
+    /// table has a different, larger layout (MB_FUS_DeviceInfoTable_t).
+    pub fn device_info_raw(&self) -> [u32; 16] {
+        unsafe { ptr::read_volatile(TL_DEVICE_INFO_TABLE.as_ptr()) }
     }
 
     /// Send a request to CPU2 to start the wireless stack

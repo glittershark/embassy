@@ -2,5 +2,8 @@
 pub mod ble;
 #[cfg(feature = "wb55_mac")]
 pub mod mac;
+#[cfg(feature = "wb55_thread")]
+pub mod thread;
 pub mod mm;
+pub mod traces;
 pub mod sys;

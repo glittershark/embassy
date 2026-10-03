@@ -35,6 +35,7 @@ impl<T: ShciFromEventSerial> SealedSchiFromPacket for T {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SchiCommandStatus {
     ShciSuccess = 0x00,
@@ -155,6 +156,7 @@ impl TryFrom<u8> for ShciFusGetStateErrorCode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SchiSysEventReady {
     WirelessFwRunning = 0x00,
