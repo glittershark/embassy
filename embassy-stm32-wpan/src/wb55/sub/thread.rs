@@ -160,6 +160,20 @@ impl<'a> ThreadNotifRx<'a> {
     /// Wait for the next OpenThread notification from CPU2, copy out its ID
     /// and first arguments, and acknowledge it.
     pub async fn receive(&mut self) -> OtNotification {
+        self.receive_with(|notification| notification).await
+    }
+
+    /// Wait for the next OpenThread notification from CPU2 and hand its ID
+    /// and first arguments to `f`, acknowledging it only once `f` has
+    /// returned.
+    ///
+    /// CPU2 is inside the callback it is notifying about until that
+    /// acknowledgement, and what the notification points at (the message of
+    /// a UDP receive, for one) is only valid until then. `f` is therefore
+    /// where to read it: CPU2 answers API calls while a notification is
+    /// outstanding. `f` is not async, so it has to make those calls by
+    /// blocking on [`ThreadOt::call`].
+    pub async fn receive_with<R>(&mut self, mut f: impl FnMut(OtNotification) -> R) -> R {
         self.notification_ack
             .receive(|| unsafe {
                 // EvtPacket: header, then { type, evtcode, plen, payload... }
@@ -173,8 +187,9 @@ impl<'a> ThreadNotifRx<'a> {
                         *d = rd(8 + 4 * i);
                     }
                 }
+                let ret = f(OtNotification { id, size, data });
                 write_ack_type();
-                Some(OtNotification { id, size, data })
+                Some(ret)
             })
             .await
     }
