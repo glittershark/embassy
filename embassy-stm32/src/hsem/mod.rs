@@ -274,10 +274,16 @@ pub(crate) fn init_hsem(cs: CriticalSection) {
 #[cfg(any(all(stm32wb, feature = "low-power"), stm32wl5x))]
 pub(crate) const fn get_hsem<'a>(index: usize) -> HardwareSemaphoreChannel<'a, crate::peripherals::HSEM> {
     match index {
-        #[cfg(any(stm32wb, stm32wl5x))]
+        #[cfg(stm32wl5x)]
         3 => HardwareSemaphoreChannel::new(3),
+        // On stm32wb the other core runs ST's firmware, which numbers the semaphores as the
+        // registers are numbered, from 0: its RCC semaphore (`CFG_HW_RCC_SEMID`, 3) is HSEM_R3
+        // and its stop-entry semaphore (`CFG_HW_ENTRY_STOP_MODE_SEMID`, 4) is HSEM_R4. The
+        // channels of this driver are numbered from 1.
         #[cfg(stm32wb)]
-        4 => HardwareSemaphoreChannel::new(4),
+        3 => HardwareSemaphoreChannel::new(4),
+        #[cfg(stm32wb)]
+        4 => HardwareSemaphoreChannel::new(5),
         _ => core::unreachable!(),
     }
 }

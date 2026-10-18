@@ -211,7 +211,6 @@ impl<'a> IpccRxChannel<'a> {
 
     /// Receive data from an IPCC channel. The closure is called to read the data when appropriate.
     pub async fn receive<R>(&mut self, mut f: impl FnMut() -> Option<R>) -> R {
-        let _scoped_wake_guard = IPCC::RCC_INFO.wake_guard();
         let regs = IPCC::regs();
         let core = CoreId::current();
 
@@ -246,6 +245,11 @@ impl<'a> IpccRxChannel<'a> {
                 }
             })
             .await;
+
+            // No wake guard is held while waiting for the other core: the
+            // channel-occupied interrupt wakes this core from stop. Hold one
+            // from here, while the data is read and acknowledged.
+            let _scoped_wake_guard = IPCC::RCC_INFO.wake_guard();
 
             trace!("ipcc: ch {}: read data", self.index as u8);
 

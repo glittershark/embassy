@@ -79,88 +79,134 @@ mod platform {
 
     use crate::rcc::StopMode;
 
+    /// The clocks that stop mode changes, as they were before `enter_stop`.
+    #[cfg(stm32wb)]
+    #[derive(Clone, Copy)]
+    struct ClocksBeforeStop {
+        cr: crate::pac::rcc::regs::Cr,
+        sw: crate::pac::rcc::vals::Sw,
+        smpssel: crate::pac::rcc::vals::Smps,
+    }
+
+    #[cfg(stm32wb)]
+    static mut CLOCKS_BEFORE_STOP: Option<ClocksBeforeStop> = None;
+
+    // This is `ExitLowPower` of ST's applications, which only turns HSE on again. Stop mode
+    // also turns the PLLs and MSI off, so all of them are restored here.
+    #[cfg(stm32wb)]
+    fn exit_stop_stm32wb(_cs: CriticalSection<'_>) {
+        use crate::hsem::get_hsem;
+        use crate::pac::RCC;
+
+        // Held since `enter_stop` if CPU2 was running then.
+        get_hsem(4).unlock(0);
+
+        // SAFETY: only this function and `enter_stop` use the static, both in a critical
+        // section.
+        let Some(before) = (unsafe { CLOCKS_BEFORE_STOP }) else {
+            return;
+        };
+        unsafe { CLOCKS_BEFORE_STOP = None };
+
+        let sem3_mutex = get_hsem(3).blocking_lock(0);
+
+        // Each of these is still on if the system did not stop, and CPU2 may have turned
+        // HSE on already. HSI is left on: CPU2 may be using it.
+        if before.cr.msion() {
+            RCC.cr().modify(|w| w.set_msion(true));
+            while !RCC.cr().read().msirdy() {}
+        }
+        if before.cr.hseon() {
+            RCC.cr().modify(|w| w.set_hseon(true));
+            while !RCC.cr().read().hserdy() {}
+        }
+        if before.cr.pllon() {
+            RCC.cr().modify(|w| w.set_pllon(true));
+            while !RCC.cr().read().pllrdy() {}
+        }
+        if before.cr.pllsai1on() {
+            RCC.cr().modify(|w| w.set_pllsai1on(true));
+            while !RCC.cr().read().pllsai1rdy() {}
+        }
+
+        if RCC.cfgr().read().sws() != before.sw {
+            RCC.cfgr().modify(|w| w.set_sw(before.sw));
+            while RCC.cfgr().read().sws() != before.sw {}
+        }
+        if RCC.smpscr().read().smpssel() != before.smpssel {
+            RCC.smpscr().modify(|w| w.set_smpssel(before.smpssel));
+        }
+
+        drop(sem3_mutex);
+    }
+
     /// Enter stop mode
     pub fn enter_stop(_cs: CriticalSection, stop_mode: StopMode) -> Result<(), ()> {
+        // This is `EnterLowPower` of ST's applications (`stm32_lpm_if.c`). CPU2 follows the
+        // same protocol.
         #[cfg(stm32wb)]
         fn enter_stop_stm32wb(
             _cs: CriticalSection<'_>,
-        ) -> Result<crate::hsem::HardwareSemaphoreMutex<'_, crate::peripherals::HSEM>, ()> {
-            use core::task::Poll;
-
-            use embassy_futures::poll_once;
-
+        ) -> crate::hsem::HardwareSemaphoreMutex<'static, crate::peripherals::HSEM> {
             use crate::hsem::get_hsem;
             use crate::pac::rcc::vals::{Smps, Sw};
             use crate::pac::{PWR, RCC};
 
-            trace!("low power: trying to get sem3");
+            // The system clock after stop is HSI16.
+            RCC.cfgr().modify(|w| w.set_stopwuck(true));
 
-            let sem3_mutex = match poll_once(get_hsem(3).lock(0)) {
-                Poll::Pending => None,
-                Poll::Ready(mutex) => Some(mutex),
-            }
-            .ok_or(())?;
-
+            // CPU2 only holds the RCC semaphore while it changes the clocks.
+            let sem3_mutex = get_hsem(3).blocking_lock(0);
             trace!("low power: got sem3");
 
-            let sem4_mutex = get_hsem(4).try_lock(0);
-            if let Some(sem4_mutex) = sem4_mutex {
-                trace!("low power: got sem4");
-
-                if PWR.extscr().read().c2ds() {
-                    drop(sem4_mutex);
-                } else {
-                    return Ok(sem3_mutex);
-                }
+            // SAFETY: only this function and `exit_stop` use the static, both in a critical
+            // section.
+            unsafe {
+                CLOCKS_BEFORE_STOP = Some(ClocksBeforeStop {
+                    cr: RCC.cr().read(),
+                    sw: RCC.cfgr().read().sw(),
+                    smpssel: RCC.smpscr().read().smpssel(),
+                });
             }
 
-            // Sem4 not granted
-            // Set HSION
+            let extscr = PWR.extscr().read();
+            let cpu2_stopped = extscr.c2ds() || extscr.c2sbf();
+            match get_hsem(4).try_lock(0) {
+                // CPU2 is running, and needs the clocks as they are. `exit_stop` releases the
+                // semaphore. Until then it tells CPU2 that this core has stopped, so that CPU2
+                // switches to HSI itself before it stops.
+                Some(sem4_mutex) if !cpu2_stopped => {
+                    trace!("low power: got sem4");
+                    core::mem::forget(sem4_mutex);
+                    return sem3_mutex;
+                }
+                // CPU2 has stopped, or it has the semaphore because it is about to. The
+                // semaphore is released here if it was granted.
+                _ => {}
+            }
+
+            // The system stops with HSI16 as its clock, as in ST's sequence.
             RCC.cr().modify(|w| {
                 w.set_hsion(true);
             });
-
-            // Wait for HSIRDY
             while !RCC.cr().read().hsirdy() {}
 
-            // Set SW to HSI
             RCC.cfgr().modify(|w| {
                 w.set_sw(Sw::HSI);
             });
-
-            // Wait for SWS to report HSI
-            while !RCC.cfgr().read().sws().eq(&Sw::HSI) {}
-
-            // Set SMPSSEL to HSI
             RCC.smpscr().modify(|w| {
                 w.set_smpssel(Smps::HSI);
             });
+            while !RCC.cfgr().read().sws().eq(&Sw::HSI) {}
 
-            Ok(sem3_mutex)
+            sem3_mutex
         }
 
+        // The SMPS stays as the application set it. The chip opens it by itself in Stop 1 and
+        // Stop 2 and closes it again afterwards, and ST's sequence does not touch it. Turning
+        // it off here left it off for good after the first stop.
         #[cfg(stm32wb)]
-        let mutex = {
-            use crate::pac::{PWR, RCC};
-
-            let mutex = enter_stop_stm32wb(_cs)?;
-
-            // on PWR
-            RCC.apb1enr1().modify(|r| r.0 |= 1 << 28);
-            cortex_m::asm::dsb();
-
-            // off SMPS, on Bypass
-            PWR.cr5().modify(|r| {
-                let mut val = r.0;
-                val &= !(1 << 15); // sdeb = 0 (off SMPS)
-                val |= 1 << 14; // sdben = 1 (on Bypass)
-                r.0 = val
-            });
-
-            cortex_m::asm::delay(1000);
-
-            mutex
-        };
+        let mutex = enter_stop_stm32wb(_cs);
 
         #[cfg(any(stm32l4, stm32l5, stm32u5, stm32u3, stm32u0, stm32wb, stm32wba, stm32wl))]
         {
@@ -204,6 +250,8 @@ mod platform {
         });
         #[cfg(stm32wba)]
         crate::pac::PWR.sr().modify(|w| w.set_cssf(true));
+        #[cfg(stm32wb)]
+        crate::pac::PWR.extscr().modify(|w| w.set_c1cssf(true));
 
         #[cfg(stm32l0)]
         crate::pac::PWR.cr().modify(|w| w.set_cwuf(true));
@@ -269,6 +317,12 @@ mod platform {
                 // when we wake from any stop mode we need to re-initialize the rcc
                 crate::rcc::reinit_saved(_cs);
             }
+
+            // On stm32wb the clocks are restored without the detour through MSI that
+            // `reinit_saved` makes: CPU2 is clocked from the system clock too, and may be using
+            // the radio.
+            #[cfg(stm32wb)]
+            exit_stop_stm32wb(_cs);
 
             #[cfg(stm32wba)]
             match (es.stopf(), es.stop2f()) {
@@ -353,12 +407,18 @@ fn configure_pwr(cs: CriticalSection) {
         return;
     };
 
+    // The next alarm is too close: sleep without stopping, so that the time
+    // driver keeps running and wakes the core for it.
     if get_driver().pause_time(cs).is_err() {
-        warn!("low_power: failed to pause time, not entering stop");
+        trace!("low power: not entering stop: the next alarm is too close");
+        return;
     }
 
+    // Time is paused now, and the RTC wakes the core for the next alarm.
+    // Sleep without stopping; `on_wakeup_irq_or_event` resumes time.
     if platform::enter_stop(cs, stop_mode).is_err() {
-        warn!("low_power: failed to enter stop");
+        trace!("low power: not entering stop");
+        return;
     }
 
     #[cfg(stm32l0)]
