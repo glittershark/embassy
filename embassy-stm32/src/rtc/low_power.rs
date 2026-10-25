@@ -90,10 +90,14 @@ impl Rtc {
                 // there is a table for every "Event input" / "EXTI Line".
                 // If you find the EXTI line related to "RTC wakeup" marks as "Configurable" (not "Direct"),
                 // then write 1 to related field of Pending Register, to clean it's pending state.
+                //
+                // The register is write-1-to-clear, so write the one bit: a `modify` would write
+                // back every line that is pending, and clear them all. A GPIO edge that woke the
+                // core from stop mode was then lost before its interrupt handler could see it.
                 #[cfg(any(exti_v1, stm32h7, stm32wb))]
                 crate::pac::EXTI
                     .pr(0)
-                    .modify(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));
+                    .write(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));
 
                 <RTC as crate::rtc::SealedInstance>::WakeupInterrupt::unpend();
             });
