@@ -94,7 +94,16 @@ impl<'a> Ble<'a> {
     }
 
     /// `HW_IPCC_BLE_EvtNot`
+    ///
+    /// CPU2 signals the channel once for any number of queued events, and
+    /// each queued event keeps its buffer until it is released. So an event
+    /// that is already queued is returned without waiting, as ST's
+    /// `HW_IPCC_BLE_EvtHandler` drains the whole queue. Otherwise the events
+    /// left in the queue use up CPU2's buffers, and CPU2 never signals again.
     pub async fn tl_read(&mut self) -> EvtBox<Self> {
+        if let Some(event) = queued_event() {
+            return event;
+        }
         self.ipcc_ble_event_channel
             .receive(|| unsafe {
                 if let Some(node_ptr) =
@@ -147,6 +156,12 @@ impl<'a> evt::MemoryManager for Ble<'a> {
     }
 }
 
+/// The first event in the queue that CPU2 fills, if any.
+fn queued_event<T: evt::MemoryManager>() -> Option<EvtBox<T>> {
+    let node_ptr = critical_section::with(|cs| unsafe { LinkedListNode::remove_head(cs, EVT_QUEUE.as_mut_ptr()) })?;
+    Some(EvtBox::new(node_ptr.cast()))
+}
+
 pub extern crate stm32wb_hci as hci;
 
 impl<'a> hci::Controller for Ble<'a> {
@@ -189,7 +204,16 @@ impl<'a> BleTx<'a> {
 
 impl<'a> BleRx<'a> {
     /// `HW_IPCC_BLE_EvtNot`
+    ///
+    /// CPU2 signals the channel once for any number of queued events, and
+    /// each queued event keeps its buffer until it is released. So an event
+    /// that is already queued is returned without waiting, as ST's
+    /// `HW_IPCC_BLE_EvtHandler` drains the whole queue. Otherwise the events
+    /// left in the queue use up CPU2's buffers, and CPU2 never signals again.
     pub async fn tl_read(&mut self) -> EvtBox<Self> {
+        if let Some(event) = queued_event() {
+            return event;
+        }
         self.ipcc_ble_event_channel
             .receive(|| unsafe {
                 if let Some(node_ptr) =
